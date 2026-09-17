@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NFC App</string>
+    <string name="apdu_service_description">NFC卡片模擬服務</string>
+    <string name="ndef_emulator_description">NDEF Emulator</string>
+</resources>
