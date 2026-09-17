@@ -7,19 +7,19 @@ class NfcEmulationService : HostApduService() {
 
     companion object {
         @Volatile
-        var currentNdefMessage: ByteArray = createTextNdefRecord("")
+        var currentNdefMessage: ByteArray = createTextNdefRecord("NFC App")
 
         fun createTextNdefRecord(text: String): ByteArray {
-            if (text.isEmpty()) return byteArrayOf()
+            val content = if (text.isEmpty()) "Empty" else text
             val langBytes = "en".toByteArray(Charsets.US_ASCII)
-            val textBytes = text.toByteArray(Charsets.UTF_8)
+            val textBytes = content.toByteArray(Charsets.UTF_8)
             val payload = ByteArray(1 + langBytes.size + textBytes.size)
 
             payload[0] = langBytes.size.toByte()
             System.arraycopy(langBytes, 0, payload, 1, langBytes.size)
             System.arraycopy(textBytes, 0, payload, 1 + langBytes.size, textBytes.size)
 
-            val header = 0xD1.toByte()
+            val header = 0xD1.toByte() // MB=1, ME=1, CF=0, SR=1, IL=0, TNF=1
             val type = "T".toByteArray(Charsets.US_ASCII)
 
             val ndefRecord = ByteArray(3 + type.size + payload.size)
@@ -32,19 +32,20 @@ class NfcEmulationService : HostApduService() {
             return ndefRecord
         }
 
-        private val APDU_SELECT_NDEF_APP = byteArrayOf(
-            0x00.toByte(), 0xA4.toByte(), 0x04.toByte(), 0x00.toByte(), 0x07.toByte(),
-            0xD2.toByte(), 0x76.toByte(), 0x00.toByte(), 0x00.toByte(), 0x85.toByte(), 0x01.toByte(), 0x01.toByte(), 0x00.toByte()
-        )
-        private val APDU_SELECT_CC_FILE = byteArrayOf(0x00.toByte(), 0xA4.toByte(), 0x00.toByte(), 0x0C.toByte(), 0x02.toByte(), 0xE1.toByte(), 0x03.toByte())
-        private val APDU_SELECT_NDEF_FILE = byteArrayOf(0x00.toByte(), 0xA4.toByte(), 0x00.toByte(), 0x0C.toByte(), 0x02.toByte(), 0xE1.toByte(), 0x04.toByte())
-
         private val STATUS_SUCCESS = byteArrayOf(0x90.toByte(), 0x00.toByte())
         private val STATUS_FAILED = byteArrayOf(0x6A.toByte(), 0x82.toByte())
 
+        // CC File (Capability Container) for Type 4 Tag
         private val CAPABILITY_CONTAINER = byteArrayOf(
-            0x00, 0x0F, 0x20, 0x00, 0x3B, 0x00, 0x34, 0x04, 0x06,
-            0xE1.toByte(), 0x04.toByte(), 0x0B.toByte(), 0xFE.toByte(), 0x00, 0x00
+            0x00, 0x0F, // CCLEN: 15 bytes
+            0x20,       // Mapping Version 2.0
+            0x00, 0x3B, // MLe: Max Read 59 bytes
+            0x00, 0x34, // MLc: Max Write 52 bytes
+            0x04, 0x06, // T=NDEF Control TLV, L=6
+            0xE1.toByte(), 0x04.toByte(), // File ID = E104
+            0x0B.toByte(), 0xFE.toByte(), // Max NDEF File Size = 3070 bytes
+            0x00,       // Read Access (00 = granted)
+            0x00        // Write Access (00 = granted)
         )
     }
 
@@ -52,23 +53,35 @@ class NfcEmulationService : HostApduService() {
     private var currentSelectedFile = SelectedFile.NONE
 
     override fun processCommandApdu(commandApdu: ByteArray?, extras: Bundle?): ByteArray {
-        if (commandApdu == null) return STATUS_FAILED
+        if (commandApdu == null || commandApdu.size < 4) return STATUS_FAILED
 
-        if (commandApdu.contentEquals(APDU_SELECT_NDEF_APP)) {
-            currentSelectedFile = SelectedFile.NONE
-            return STATUS_SUCCESS
-        }
-        if (commandApdu.contentEquals(APDU_SELECT_CC_FILE)) {
-            currentSelectedFile = SelectedFile.CC_FILE
-            return STATUS_SUCCESS
-        }
-        if (commandApdu.contentEquals(APDU_SELECT_NDEF_FILE)) {
-            currentSelectedFile = SelectedFile.NDEF_FILE
-            return STATUS_SUCCESS
+        val ins = commandApdu[1].toInt() and 0xFF
+        val p1 = commandApdu[2].toInt() and 0xFF
+        val p2 = commandApdu[3].toInt() and 0xFF
+
+        // 1. SELECT 指令處理 (INS = 0xA4)
+        if (ins == 0xA4) {
+            // 選擇 NDEF Application (AID = D2760000850101)
+            if (isNdefAppSelect(commandApdu)) {
+                currentSelectedFile = SelectedFile.NONE
+                return STATUS_SUCCESS
+            }
+            // 選擇 CC File (FID = E103)
+            if (commandApdu.size >= 7 && commandApdu[5] == 0xE1.toByte() && commandApdu[6] == 0x03.toByte()) {
+                currentSelectedFile = SelectedFile.CC_FILE
+                return STATUS_SUCCESS
+            }
+            // 選擇 NDEF File (FID = E104)
+            if (commandApdu.size >= 7 && commandApdu[5] == 0xE1.toByte() && commandApdu[6] == 0x04.toByte()) {
+                currentSelectedFile = SelectedFile.NDEF_FILE
+                return STATUS_SUCCESS
+            }
+            return STATUS_FAILED
         }
 
-        if (commandApdu.size >= 4 && commandApdu[0] == 0x00.toByte() && commandApdu[1] == 0xB0.toByte()) {
-            val offset = ((commandApdu[2].toInt() and 0xFF) shl 8) or (commandApdu[3].toInt() and 0xFF)
+        // 2. READ BINARY 指令處理 (INS = 0xB0)
+        if (ins == 0xB0) {
+            val offset = (p1 shl 8) or p2
             val length = if (commandApdu.size >= 5) commandApdu[4].toInt() and 0xFF else 0
 
             return when (currentSelectedFile) {
@@ -80,7 +93,17 @@ class NfcEmulationService : HostApduService() {
                 SelectedFile.NONE -> STATUS_FAILED
             }
         }
+
         return STATUS_FAILED
+    }
+
+    private fun isNdefAppSelect(apdu: ByteArray): Boolean {
+        val targetAid = byteArrayOf(0xD2.toByte(), 0x76.toByte(), 0x00.toByte(), 0x00.toByte(), 0x85.toByte(), 0x01.toByte(), 0x01.toByte())
+        if (apdu.size < 5 + targetAid.size) return false
+        for (i in targetAid.indices) {
+            if (apdu[5 + i] != targetAid[i]) return false
+        }
+        return true
     }
 
     override fun onDeactivated(reason: Int) {
