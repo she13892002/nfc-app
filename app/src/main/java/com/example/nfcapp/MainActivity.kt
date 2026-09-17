@@ -18,6 +18,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import org.json.JSONArray
 import org.json.JSONObject
+import android.nfc.NfcAdapter
+import android.nfc.cardemulation.CardEmulation
+import android.content.ComponentName
+
+// 在 MainActivity 內新增以下內容：
+override fun onResume() {
+    super.onResume()
+    val nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+    if (nfcAdapter != null && nfcAdapter.isEnabled) {
+        val cardEmulation = CardEmulation.getInstance(nfcAdapter)
+        val componentName = ComponentName(this, NfcEmulationService::class.java)
+        // 強制設定此 App 開啟時為最高優先權 HCE 服務
+        cardEmulation.setPreferredService(this, componentName)
+    }
+}
+
+override fun onPause() {
+    super.onPause()
+    val nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+    if (nfcAdapter != null) {
+        val cardEmulation = CardEmulation.getInstance(nfcAdapter)
+        // 離開 App 時解除優先權
+        cardEmulation.unsetPreferredService(this)
+    }
+}
 
 data class NfcItem(val id: String, val name: String, val payloadText: String)
 
